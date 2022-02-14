@@ -130,3 +130,8 @@ dmypy.json
 
 # Project
 .vscode/
+
+
+# Other
+.DS_Store
+*.tmp
