@@ -1,15 +1,14 @@
 from collections import defaultdict
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Callable
 from datetime import datetime
 from enum import Enum
-from functools import lru_cache
-from tzlocal import get_localzone
+from tzlocal import get_localzone_name
 
 from vnpy.trader.object import (
     HistoryRequest, TickData, PositionData, TradeData, ContractData, BarData
 )
 from vnpy.trader.constant import Direction, Offset, Exchange, Interval
-from vnpy.trader.utility import floor_to, ceil_to, round_to, extract_vt_symbol
+from vnpy.trader.utility import floor_to, ceil_to, round_to, extract_vt_symbol, ZoneInfo
 from vnpy.trader.database import BaseDatabase, get_database
 from vnpy.trader.datafeed import BaseDatafeed, get_datafeed
 
@@ -20,13 +19,13 @@ EVENT_SPREAD_LOG = "eSpreadLog"
 EVENT_SPREAD_ALGO = "eSpreadAlgo"
 EVENT_SPREAD_STRATEGY = "eSpreadStrategy"
 
-LOCAL_TZ = get_localzone()
+LOCAL_TZ = ZoneInfo(get_localzone_name())
 
 
 class LegData:
     """"""
 
-    def __init__(self, vt_symbol: str):
+    def __init__(self, vt_symbol: str) -> None:
         """"""
         self.vt_symbol: str = vt_symbol
 
@@ -52,14 +51,14 @@ class LegData:
         self.min_volume: float = 0
         self.pricetick: float = 0
 
-    def update_contract(self, contract: ContractData):
+    def update_contract(self, contract: ContractData) -> None:
         """"""
         self.size = contract.size
         self.net_position = contract.net_position
         self.min_volume = contract.min_volume
         self.pricetick = contract.pricetick
 
-    def update_tick(self, tick: TickData):
+    def update_tick(self, tick: TickData) -> None:
         """"""
         self.bid_price = tick.bid_price_1
         self.ask_price = tick.ask_price_1
@@ -69,7 +68,7 @@ class LegData:
 
         self.tick = tick
 
-    def update_position(self, position: PositionData):
+    def update_position(self, position: PositionData) -> None:
         """"""
         if position.direction == Direction.NET:
             self.net_pos = position.volume
@@ -81,15 +80,15 @@ class LegData:
                 self.short_pos = position.volume
             self.net_pos = self.long_pos - self.short_pos
 
-    def update_trade(self, trade: TradeData):
+    def update_trade(self, trade: TradeData) -> None:
         """"""
         # Only update net pos for contract with net position mode
         if self.net_position:
-            trade_cost = trade.volume * trade.price
-            old_cost = self.net_pos * self.net_pos_price
+            trade_cost: float = trade.volume * trade.price
+            old_cost: float = self.net_pos * self.net_pos_price
 
             if trade.direction == Direction.LONG:
-                new_pos = self.net_pos + trade.volume
+                new_pos: float = self.net_pos + trade.volume
 
                 if self.net_pos >= 0:
                     new_cost = old_cost + trade_cost
@@ -102,7 +101,7 @@ class LegData:
                     elif new_pos > 0:
                         self.net_pos_price = trade.price
             else:
-                new_pos = self.net_pos - trade.volume
+                new_pos: float = self.net_pos - trade.volume
 
                 if self.net_pos <= 0:
                     new_cost = old_cost - trade_cost
@@ -143,10 +142,12 @@ class SpreadData:
         price_formula: str,
         trading_multipliers: Dict[str, int],
         active_symbol: str,
-        min_volume: float
-    ):
+        min_volume: float,
+        compile_formula: bool = True
+    ) -> None:
         """"""
         self.name: str = name
+        self.compile_formula: bool = compile_formula
 
         self.legs: Dict[str, LegData] = {}
         self.active_leg: LegData = None
@@ -168,7 +169,7 @@ class SpreadData:
             else:
                 self.passive_legs.append(leg)
 
-            trading_multiplier = self.trading_multipliers[leg.vt_symbol]
+            trading_multiplier: int = self.trading_multipliers[leg.vt_symbol]
             if trading_multiplier > 0:
                 self.trading_formula += f"+{trading_multiplier}*{leg.vt_symbol}"
             else:
@@ -185,20 +186,29 @@ class SpreadData:
         self.bid_volume: float = 0
         self.ask_volume: float = 0
 
-        self.net_pos: float = 0
+        self.long_pos: int = 0
+        self.short_pos: int = 0
+        self.net_pos: int = 0
+
         self.datetime: datetime = None
 
-        self.leg_pos: Dict[str, int] = defaultdict(int)
+        self.leg_pos: defaultdict = defaultdict(int)
 
         # 价差计算公式相关
-        self.variable_symbols = variable_symbols
-        self.variable_directions = variable_directions
+        self.variable_symbols: dict = variable_symbols
+        self.variable_directions: dict = variable_directions
         self.price_formula = price_formula
-        self.price_code = compile(price_formula, __name__, "eval")
 
-        self.variable_legs = {}
+        # 实盘时编译公式，加速计算
+        if compile_formula:
+            self.price_code: str = compile(price_formula, __name__, "eval")
+        # 回测时不编译公式，从而支持多进程优化
+        else:
+            self.price_code: str = price_formula
+
+        self.variable_legs: Dict[str, LegData] = {}
         for variable, vt_symbol in variable_symbols.items():
-            leg = self.legs[vt_symbol]
+            leg: LegData = self.legs[vt_symbol]
             self.variable_legs[variable] = leg
 
     def calculate_price(self) -> bool:
@@ -211,9 +221,9 @@ class SpreadData:
         self.clear_price()
 
         # Go through all legs to calculate price
-        bid_data = {}
-        ask_data = {}
-        volume_inited = False
+        bid_data: dict = {}
+        ask_data: dict = {}
+        volume_inited: bool = False
 
         for variable, leg in self.variable_legs.items():
             # Filter not all leg price data has been received
@@ -222,7 +232,7 @@ class SpreadData:
                 return False
 
             # Generate price dict for calculating spread bid/ask
-            variable_direction = self.variable_directions[variable]
+            variable_direction: int = self.variable_directions[variable]
             if variable_direction > 0:
                 bid_data[variable] = leg.bid_price
                 ask_data[variable] = leg.ask_price
@@ -231,28 +241,28 @@ class SpreadData:
                 ask_data[variable] = leg.bid_price
 
             # Calculate volume
-            trading_multiplier = self.trading_multipliers[leg.vt_symbol]
+            trading_multiplier: int = self.trading_multipliers[leg.vt_symbol]
             if not trading_multiplier:
                 continue
 
-            leg_bid_volume = leg.bid_volume
-            leg_ask_volume = leg.ask_volume
+            leg_bid_volume: float = leg.bid_volume
+            leg_ask_volume: float = leg.ask_volume
 
             if trading_multiplier > 0:
-                adjusted_bid_volume = floor_to(
+                adjusted_bid_volume: float = floor_to(
                     leg_bid_volume / trading_multiplier,
                     self.min_volume
                 )
-                adjusted_ask_volume = floor_to(
+                adjusted_ask_volume: float = floor_to(
                     leg_ask_volume / trading_multiplier,
                     self.min_volume
                 )
             else:
-                adjusted_bid_volume = floor_to(
+                adjusted_bid_volume: float = floor_to(
                     leg_ask_volume / abs(trading_multiplier),
                     self.min_volume
                 )
-                adjusted_ask_volume = floor_to(
+                adjusted_ask_volume: float = floor_to(
                     leg_bid_volume / abs(trading_multiplier),
                     self.min_volume
                 )
@@ -281,14 +291,14 @@ class SpreadData:
 
         return True
 
-    def update_trade(self, trade: TradeData):
+    def update_trade(self, trade: TradeData) -> None:
         """更新委托成交"""
         if trade.direction == Direction.LONG:
             self.leg_pos[trade.vt_symbol] += trade.volume
         else:
             self.leg_pos[trade.vt_symbol] -= trade.volume
 
-    def calculate_pos(self):
+    def calculate_pos(self) -> None:
         """"""
         long_pos = 0
         short_pos = 0
@@ -297,7 +307,7 @@ class SpreadData:
             leg_long_pos = 0
             leg_short_pos = 0
 
-            trading_multiplier = self.trading_multipliers[leg.vt_symbol]
+            trading_multiplier: int = self.trading_multipliers[leg.vt_symbol]
             if not trading_multiplier:
                 continue
 
@@ -318,12 +328,11 @@ class SpreadData:
                 long_pos = min(long_pos, leg_long_pos)
                 short_pos = min(short_pos, leg_short_pos)
 
-        if long_pos > 0:
-            self.net_pos = long_pos
-        else:
-            self.net_pos = -short_pos
+        self.long_pos = long_pos
+        self.short_pos = short_pos
+        self.net_pos = long_pos - short_pos
 
-    def clear_price(self):
+    def clear_price(self) -> None:
         """"""
         self.bid_price = 0
         self.ask_price = 0
@@ -332,16 +341,16 @@ class SpreadData:
 
     def calculate_leg_volume(self, vt_symbol: str, spread_volume: float) -> float:
         """"""
-        leg = self.legs[vt_symbol]
-        trading_multiplier = self.trading_multipliers[leg.vt_symbol]
-        leg_volume = spread_volume * trading_multiplier
+        leg: LegData = self.legs[vt_symbol]
+        trading_multiplier: int = self.trading_multipliers[leg.vt_symbol]
+        leg_volume: float = spread_volume * trading_multiplier
         return leg_volume
 
     def calculate_spread_volume(self, vt_symbol: str, leg_volume: float) -> float:
         """"""
-        leg = self.legs[vt_symbol]
-        trading_multiplier = self.trading_multipliers[leg.vt_symbol]
-        spread_volume = leg_volume / trading_multiplier
+        leg: LegData = self.legs[vt_symbol]
+        trading_multiplier: int = self.trading_multipliers[leg.vt_symbol]
+        spread_volume: float = leg_volume / trading_multiplier
 
         if spread_volume > 0:
             spread_volume = floor_to(spread_volume, self.min_volume)
@@ -350,9 +359,9 @@ class SpreadData:
 
         return spread_volume
 
-    def to_tick(self):
+    def to_tick(self) -> None:
         """"""
-        tick = TickData(
+        tick: TickData = TickData(
             symbol=self.name,
             exchange=Exchange.LOCAL,
             datetime=self.datetime,
@@ -368,10 +377,10 @@ class SpreadData:
 
     def get_leg_size(self, vt_symbol: str) -> float:
         """"""
-        leg = self.legs[vt_symbol]
+        leg: LegData = self.legs[vt_symbol]
         return leg.size
 
-    def parse_formula(self, formula: str, data: Dict[str, float]):
+    def parse_formula(self, formula: str, data: Dict[str, float]) -> Any:
         """"""
         locals().update(data)
         value = eval(formula)
@@ -383,14 +392,15 @@ class BacktestingMode(Enum):
     TICK = 2
 
 
-@lru_cache(maxsize=999)
 def load_bar_data(
     spread: SpreadData,
     interval: Interval,
     start: datetime,
     end: datetime,
-    pricetick: float = 0
-):
+    pricetick: float = 0,
+    output: Callable = print,
+    backtesting: bool = False
+) -> List[BarData]:
     """"""
     database: BaseDatabase = get_database()
 
@@ -400,12 +410,16 @@ def load_bar_data(
     for vt_symbol in spread.legs.keys():
         symbol, exchange = extract_vt_symbol(vt_symbol)
 
-        # First, try to query history from RQData
-        bar_data: List[BarData] = query_bar_from_rq(
-            symbol, exchange, interval, start, end
-        )
+        # 初始化K线列表
+        bar_data: List[BarData] = [] 
 
-        # If failed, query history from database
+        # 只有实盘才优先尝试从数据服务查询
+        if not backtesting:
+            bar_data = query_bar_from_datafeed(
+                symbol, exchange, interval, start, end, output
+            )
+
+        # 如果查询失败，则尝试从数据库中读取
         if not bar_data:
             bar_data = database.load_bar_data(
                 symbol, exchange, interval, start, end
@@ -420,18 +434,18 @@ def load_bar_data(
     for dt in bars.keys():
         spread_price = 0
         spread_value = 0
-        spread_available = True
+        spread_available: bool = True
 
-        leg_data = {}
+        leg_data: dict = {}
         for variable, leg in spread.variable_legs.items():
-            leg_bar = leg_bars[leg.vt_symbol].get(dt, None)
+            leg_bar: Optional[BarData] = leg_bars[leg.vt_symbol].get(dt, None)
 
             if leg_bar:
                 # 缓存该腿当前的价格
                 leg_data[variable] = leg_bar.close_price
 
                 # 基于交易乘数累计价值
-                trading_multiplier = spread.trading_multipliers[leg.vt_symbol]
+                trading_multiplier: int = spread.trading_multipliers[leg.vt_symbol]
                 spread_value += trading_multiplier * leg_bar.close_price
             else:
                 spread_available = False
@@ -439,9 +453,9 @@ def load_bar_data(
         if spread_available:
             spread_price = spread.parse_formula(spread.price_code, leg_data)
             if pricetick:
-                spread_price = round_to(spread_price, pricetick)
+                spread_price: float = round_to(spread_price, pricetick)
 
-            spread_bar = BarData(
+            spread_bar: BarData = BarData(
                 symbol=spread.name,
                 exchange=exchange.LOCAL,
                 datetime=dt,
@@ -458,12 +472,11 @@ def load_bar_data(
     return spread_bars
 
 
-@lru_cache(maxsize=999)
 def load_tick_data(
     spread: SpreadData,
     start: datetime,
     end: datetime
-):
+) -> List[TickData]:
     """"""
     database: BaseDatabase = get_database()
     return database.load_tick_data(
@@ -471,24 +484,25 @@ def load_tick_data(
     )
 
 
-def query_bar_from_rq(
+def query_bar_from_datafeed(
     symbol: str,
     exchange: Exchange,
     interval: Interval,
     start: datetime,
-    end: datetime
-):
+    end: datetime,
+    output: Callable = print
+) -> List[BarData]:
     """
     Query bar data from RQData.
     """
     datafeed: BaseDatafeed = get_datafeed()
 
-    req = HistoryRequest(
+    req: HistoryRequest = HistoryRequest(
         symbol=symbol,
         exchange=exchange,
         interval=interval,
         start=start,
         end=end
     )
-    data = datafeed.query_bar_history(req)
+    data: List[BarData] = datafeed.query_bar_history(req, output)
     return data

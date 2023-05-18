@@ -1,13 +1,13 @@
-# vn.py框架的价差交易模块
+# VeighNa框架的价差交易模块
 
 <p align="center">
   <img src ="https://vnpy.oss-cn-shanghai.aliyuncs.com/vnpy-logo.png"/>
 </p>
 
 <p align="center">
-    <img src ="https://img.shields.io/badge/version-1.1.3-blueviolet.svg"/>
+    <img src ="https://img.shields.io/badge/version-1.1.8-blueviolet.svg"/>
     <img src ="https://img.shields.io/badge/platform-windows|linux|macos-yellow.svg"/>
-    <img src ="https://img.shields.io/badge/python-3.7-blue.svg" />
+    <img src ="https://img.shields.io/badge/python-3.7|3.8|3.9|3.10-blue.svg" />
     <img src ="https://img.shields.io/github/license/vnpy/vnpy.svg?color=orange"/>
 </p>
 
@@ -21,7 +21,7 @@
 
 ## 安装
 
-安装需要基于2.6.0版本以上的[VN Studio](https://www.vnpy.com)。
+安装环境推荐基于3.3.0版本以上的【[**VeighNa Studio**](https://www.vnpy.com)】。
 
 直接使用pip命令：
 
@@ -29,8 +29,9 @@
 pip install vnpy_spreadtrading
 ```
 
-下载解压后在cmd中运行
+
+或者下载源代码后，解压后在cmd中运行：
 
 ```
-python setup.py install
+pip install .
 ```
