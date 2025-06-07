@@ -1,5 +1,6 @@
+import traceback
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable, Type, Dict, List, Optional
 from functools import partial
 
@@ -24,12 +25,27 @@ from vnpy.trader.optimize import (
 )
 
 from .template import SpreadStrategyTemplate, SpreadAlgoTemplate
-from .base import SpreadData, BacktestingMode, load_bar_data, load_tick_data
+from .base import (
+    SpreadData,
+    BacktestingMode,
+    load_bar_data,
+    load_tick_data,
+    EngineType
+)
+
+
+INTERVAL_DELTA_MAP: Dict[Interval, timedelta] = {
+    Interval.TICK: timedelta(milliseconds=1),
+    Interval.MINUTE: timedelta(minutes=1),
+    Interval.HOUR: timedelta(hours=1),
+    Interval.DAILY: timedelta(days=1),
+}
 
 
 class BacktestingEngine:
     """"""
 
+    engine_type: EngineType = EngineType.BACKTESTING
     gateway_name: str = "BACKTESTING"
 
     def __init__(self) -> None:
@@ -43,6 +59,8 @@ class BacktestingEngine:
         self.size: float = 1
         self.pricetick: float = 0
         self.capital: int = 1_000_000
+        self.risk_free: float = 0
+        self.annual_days: int = 240
         self.mode: BacktestingMode = BacktestingMode.BAR
 
         self.strategy_class: Type[SpreadStrategyTemplate] = None
@@ -82,6 +100,7 @@ class BacktestingEngine:
         self.tick = None
         self.bar = None
         self.datetime = None
+        self.spread.net_pos = 0
 
         self.algo_count = 0
         self.algos.clear()
@@ -103,6 +122,8 @@ class BacktestingEngine:
         size: float,
         pricetick: float,
         capital: int = 0,
+        risk_free: float = 0,
+        annual_days: int = 240,
         end: datetime = None,
         mode: BacktestingMode = BacktestingMode.BAR
     ) -> None:
@@ -115,6 +136,8 @@ class BacktestingEngine:
         self.pricetick = pricetick
         self.start = start
         self.capital = capital
+        self.risk_free = risk_free
+        self.annual_days = annual_days
         self.end = end
         self.mode = mode
 
@@ -166,20 +189,6 @@ class BacktestingEngine:
             func = self.new_tick
 
         self.strategy.on_init()
-
-        # Use the first [days] of history data for initializing strategy
-        day_count: int = 0
-        ix: int = 0
-
-        for ix, data in enumerate(self.history_data):
-            if self.datetime and data.datetime.day != self.datetime.day:
-                day_count += 1
-                if day_count >= self.days:
-                    break
-
-            self.datetime = data.datetime
-            self.callback(data)
-
         self.strategy.inited = True
         self.output("策略初始化完成")
 
@@ -187,9 +196,13 @@ class BacktestingEngine:
         self.strategy.trading = True
         self.output("开始回放历史数据")
 
-        # Use the rest of history data for running backtesting
-        for data in self.history_data[ix:]:
-            func(data)
+        for data in self.history_data:
+            try:
+                func(data)
+            except Exception:
+                self.output("触发异常，回测终止")
+                self.output(traceback.format_exc())
+                return
 
         self.output("历史数据回放结束")
 
@@ -198,8 +211,7 @@ class BacktestingEngine:
         self.output("开始计算逐日盯市盈亏")
 
         if not self.trades:
-            self.output("成交记录为空，无法计算")
-            return
+            self.output("回测成交记录为空")
 
         # Add trade data into daily reuslt.
         for trade in self.trades.values():
@@ -230,7 +242,8 @@ class BacktestingEngine:
             for key, value in daily_result.__dict__.items():
                 results[key].append(value)
 
-        self.daily_df: DataFrame = DataFrame.from_dict(results).set_index("date")
+        if results:
+            self.daily_df: DataFrame = DataFrame.from_dict(results).set_index("date")
 
         self.output("逐日盯市盈亏计算完成")
         return self.daily_df
@@ -322,12 +335,13 @@ class BacktestingEngine:
             daily_trade_count: int = total_trade_count / total_days
 
             total_return: float = (end_balance / self.capital - 1) * 100
-            annual_return: float = total_return / total_days * 240
+            annual_return: float = total_return / total_days * self.annual_days
             daily_return: float = df["return"].mean() * 100
             return_std: float = df["return"].std() * 100
 
             if return_std:
-                sharpe_ratio: float = daily_return / return_std * np.sqrt(240)
+                daily_risk_free: float = self.risk_free / self.annual_days
+                sharpe_ratio: float = (daily_return - daily_risk_free) / return_std * np.sqrt(self.annual_days)
             else:
                 sharpe_ratio: float = 0
 
@@ -442,7 +456,12 @@ class BacktestingEngine:
         fig.update_layout(height=1000, width=1000)
         fig.show()
 
-    def run_bf_optimization(self, optimization_setting: OptimizationSetting, output=True) -> list:
+    def run_bf_optimization(
+        self,
+        optimization_setting: OptimizationSetting,
+        output=True,
+        max_workers: int = None
+    ) -> list:
         """"""
         if not check_optimization_setting(optimization_setting):
             return
@@ -452,6 +471,7 @@ class BacktestingEngine:
             evaluate_func,
             optimization_setting,
             get_target_value,
+            max_workers=max_workers,
             output=self.output,
         )
 
@@ -464,7 +484,13 @@ class BacktestingEngine:
 
     run_optimization = run_bf_optimization
 
-    def run_ga_optimization(self, optimization_setting: OptimizationSetting, output=True) -> list:
+    def run_ga_optimization(
+        self,
+        optimization_setting: OptimizationSetting,
+        output=True,
+        max_workers: int = None,
+        ngen_size: int = 30
+    ) -> list:
         """"""
         if not check_optimization_setting(optimization_setting):
             return
@@ -474,6 +500,8 @@ class BacktestingEngine:
             evaluate_func,
             optimization_setting,
             get_target_value,
+            max_workers=max_workers,
+            ngen_size=ngen_size,
             output=self.output
         )
 
@@ -591,13 +619,42 @@ class BacktestingEngine:
         self, spread: SpreadData, days: int, interval: Interval, callback: Callable
     ) -> None:
         """"""
-        self.days = days
         self.callback = callback
+
+        init_end = self.start - INTERVAL_DELTA_MAP[interval]
+        init_start = self.start - timedelta(days=days)
+
+        bars: List[BarData] = load_bar_data(
+            spread=self.spread,
+            interval=self.interval,
+            start=init_start,
+            end=init_end,
+            pricetick=self.pricetick,
+            backtesting=True
+        )
+
+        for bar in bars:
+            callback(bar)
+
+        return bars
 
     def load_tick(self, spread: SpreadData, days: int, callback: Callable) -> None:
         """"""
         self.days = days
-        self.callback = callback
+
+        init_end = self.start - INTERVAL_DELTA_MAP[Interval.TICK]
+        init_start = self.start - timedelta(days=days)
+
+        ticks: List[TickData] = load_tick_data(
+            self.spread,
+            init_start,
+            init_end
+        )
+
+        for tick in ticks:
+            callback(callback)
+
+        return ticks
 
     def start_algo(
         self,
@@ -677,6 +734,12 @@ class BacktestingEngine:
         Send email to default receiver.
         """
         pass
+
+    def get_engine_type(self) -> EngineType:
+        """
+        Return engine type.
+        """
+        return self.engine_type
 
     def put_strategy_event(self, strategy: SpreadStrategyTemplate) -> None:
         """
@@ -801,7 +864,7 @@ def evaluate(
     statistics: dict = engine.calculate_statistics(output=False)
 
     target_value: float = statistics[target_name]
-    return (str(setting), target_value, statistics)
+    return (setting, target_value, statistics)
 
 
 def wrap_evaluate(engine: BacktestingEngine, target_name: str) -> callable:
